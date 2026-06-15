@@ -152,6 +152,19 @@ export async function computeFootballFeatures(opts?: {
     // Featurize FINAL fixtures (training/backtest) + all upcoming SCHEDULED ones.
     const targetFixtures = [...finalTargets, ...upcoming];
 
+    // Pre-load ALL injury/suspension lineup rows once (1 query) and index by
+    // (fixtureId, team) → count. Avoids 2 count() round-trips per fixture, which
+    // is catastrophic over a remote DB (~50k round-trips for the full set).
+    const injuryRows = await prisma.footballLineup.findMany({
+      where: { role: { in: ['INJURED', 'SUSPENDED'] } },
+      select: { fixtureId: true, team: true },
+    });
+    const injuryCount = new Map<string, number>();
+    for (const r of injuryRows) {
+      const k = `${r.fixtureId}|${r.team}`;
+      injuryCount.set(k, (injuryCount.get(k) ?? 0) + 1);
+    }
+
     // Helper: as-of index into a sorted-asc array of matches (strictly before date).
     const beforeIdx = (arr: { date: Date }[], date: Date) => {
       let i = arr.length;
@@ -200,11 +213,9 @@ export async function computeFootballFeatures(opts?: {
       const awayRank = standings?.get(awayN)?.rank ?? null;
       const posDelta = homeRank != null && awayRank != null ? homeRank - awayRank : null;
 
-      // Injury/suspension counts (only available for api_football-sourced fixtures).
-      const [homeInj, awayInj] = await Promise.all([
-        prisma.footballLineup.count({ where: { fixtureId: fx.id, team: fx.homeTeam, role: { in: ['INJURED', 'SUSPENDED'] } } }),
-        prisma.footballLineup.count({ where: { fixtureId: fx.id, team: fx.awayTeam, role: { in: ['INJURED', 'SUSPENDED'] } } }),
-      ]);
+      // Injury/suspension counts from the pre-loaded map (no per-fixture query).
+      const homeInj = injuryCount.get(`${fx.id}|${fx.homeTeam}`) ?? 0;
+      const awayInj = injuryCount.get(`${fx.id}|${fx.awayTeam}`) ?? 0;
 
       rows.push({
         matchKey: fx.id,

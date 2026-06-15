@@ -159,22 +159,25 @@ export async function predictSport(sport: string, opts?: { matchKeys?: string[] 
 }
 
 async function persist(preds: EnginePrediction[]): Promise<void> {
-  for (const p of preds) {
-    await prisma.enginePrediction.upsert({
-      where: { sport_matchKey_modelVersion: { sport: p.sport, matchKey: p.matchKey, modelVersion: p.modelVersion } },
-      create: {
+  if (preds.length === 0) return;
+  // Bulk replace: delete this (sport, modelVersion) batch then createMany in
+  // chunks — far fewer round-trips than per-row upsert against a remote DB.
+  const sport = preds[0]!.sport;
+  const modelVersion = preds[0]!.modelVersion;
+  await prisma.enginePrediction.deleteMany({ where: { sport, modelVersion } });
+
+  const CHUNK = 1000;
+  for (let i = 0; i < preds.length; i += CHUNK) {
+    const slice = preds.slice(i, i + CHUNK);
+    await prisma.enginePrediction.createMany({
+      skipDuplicates: true,
+      data: slice.map((p) => ({
         sport: p.sport, league: p.league, matchKey: p.matchKey, kickoffUtc: new Date(p.kickoff),
         homeTeam: p.homeTeam, awayTeam: p.awayTeam, predictedOutcome: p.predictedOutcome,
         pHome: p.probabilities?.home ?? null, pDraw: p.probabilities?.draw ?? null, pAway: p.probabilities?.away ?? null,
         expectedMargin: p.expectedMargin, confidenceTier: p.confidenceTier, flag: p.flag ?? null,
         featuresUsed: p.featuresUsed, modelVersion: p.modelVersion,
-      },
-      update: {
-        predictedOutcome: p.predictedOutcome,
-        pHome: p.probabilities?.home ?? null, pDraw: p.probabilities?.draw ?? null, pAway: p.probabilities?.away ?? null,
-        expectedMargin: p.expectedMargin, confidenceTier: p.confidenceTier, flag: p.flag ?? null,
-        generatedAt: new Date(),
-      },
+      })),
     });
   }
 }

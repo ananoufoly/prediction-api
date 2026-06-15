@@ -119,7 +119,8 @@ export async function predictIntl(sportKey?: string): Promise<Record<string, num
     const byKey = new Map<string, IntlOut>();
     for (const o of out as IntlOut[]) byKey.set(o.matchKey, o);
 
-    let n = 0;
+    // Build all rows in memory, then bulk replace (delete + chunked createMany).
+    const toWrite = [];
     for (const r of rows) {
       const o = byKey.get(r.matchKey);
       if (!o) continue;
@@ -128,23 +129,19 @@ export async function predictIntl(sportKey?: string): Promise<Record<string, num
         ? [{ k: 'home' as const, p: pHome }, { k: 'draw' as const, p: pDraw! }, { k: 'away' as const, p: pAway }]
         : [{ k: 'home' as const, p: pHome }, { k: 'away' as const, p: pAway }];
       const top = probs.reduce((a, b) => (b.p > a.p ? b : a));
-
-      await prisma.enginePrediction.upsert({
-        where: { sport_matchKey_modelVersion: { sport: spec.sport, matchKey: r.matchKey, modelVersion: version } },
-        create: {
-          sport: spec.sport, league: r.league, matchKey: r.matchKey, kickoffUtc: r.kickoffUtc,
-          homeTeam: r.homeTeam, awayTeam: r.awayTeam, predictedOutcome: top.k,
-          pHome, pDraw, pAway, expectedMargin: null, confidenceTier: tier(top.p), flag: null,
-          featuresUsed: spec.features, modelVersion: version,
-        },
-        update: {
-          predictedOutcome: top.k, pHome, pDraw, pAway, confidenceTier: tier(top.p),
-          kickoffUtc: r.kickoffUtc, generatedAt: new Date(),
-        },
+      toWrite.push({
+        sport: spec.sport, league: r.league, matchKey: r.matchKey, kickoffUtc: r.kickoffUtc,
+        homeTeam: r.homeTeam, awayTeam: r.awayTeam, predictedOutcome: top.k,
+        pHome, pDraw, pAway, expectedMargin: null, confidenceTier: tier(top.p), flag: null,
+        featuresUsed: spec.features, modelVersion: version,
       });
-      n++;
     }
-    counts[spec.sport] = n;
+    await prisma.enginePrediction.deleteMany({ where: { sport: spec.sport, modelVersion: version } });
+    const CHUNK = 1000;
+    for (let i = 0; i < toWrite.length; i += CHUNK) {
+      await prisma.enginePrediction.createMany({ skipDuplicates: true, data: toWrite.slice(i, i + CHUNK) });
+    }
+    counts[spec.sport] = toWrite.length;
   }
   return counts;
 }

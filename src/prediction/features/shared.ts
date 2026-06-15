@@ -52,21 +52,22 @@ export interface FeatureRow {
 }
 
 /**
- * Upsert a batch of computed feature rows for one sport. Idempotent on
- * (sport, matchKey, featureVersion). Returns the number of rows written.
+ * Replace this sport's feature rows (for the current featureVersion) in bulk.
+ * Recomputation is wholesale, so we delete + createMany in chunks instead of
+ * per-row upsert — orders of magnitude fewer round-trips against a remote DB.
+ * Idempotent on (sport, matchKey, featureVersion). Returns rows written.
  */
 export async function persistFeatures(sport: Sport, rows: FeatureRow[]): Promise<number> {
+  // Clear existing rows for this (sport, version) then bulk-insert fresh ones.
+  await prisma.predictionFeature.deleteMany({ where: { sport, featureVersion: FEATURE_VERSION } });
+
+  const CHUNK = 1000;
   let written = 0;
-  for (const r of rows) {
-    await prisma.predictionFeature.upsert({
-      where: {
-        sport_matchKey_featureVersion: {
-          sport,
-          matchKey: r.matchKey,
-          featureVersion: FEATURE_VERSION,
-        },
-      },
-      create: {
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
+    await prisma.predictionFeature.createMany({
+      skipDuplicates: true,
+      data: slice.map((r) => ({
         sport,
         matchKey: r.matchKey,
         league: r.league,
@@ -75,17 +76,9 @@ export async function persistFeatures(sport: Sport, rows: FeatureRow[]): Promise
         awayTeam: r.awayTeam,
         features: r.features,
         featureVersion: FEATURE_VERSION,
-      },
-      update: {
-        features: r.features,
-        league: r.league,
-        homeTeam: r.homeTeam,
-        awayTeam: r.awayTeam,
-        kickoffUtc: r.kickoffUtc,
-        computedAt: new Date(),
-      },
+      })),
     });
-    written++;
+    written += slice.length;
   }
   return written;
 }
