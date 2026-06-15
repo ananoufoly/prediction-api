@@ -1,0 +1,50 @@
+name: weekly-retrain
+
+# Full weekly refresh: retrain every model on all history, then regenerate
+# predictions. Needs Python (scipy/sklearn trainers) + Node.
+on:
+  schedule:
+    - cron: '0 5 * * 1' # 05:00 UTC every Monday
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # Refresh international data + features (eloratings / ESPN) before training.
+      - name: Compute features (club)
+        run: npx tsx src/prediction/scripts/computeFeatures.ts
+
+      - name: International pipeline (ingest + features + train + predict)
+        run: npx tsx src/prediction/scripts/intlPipeline.ts
+
+      - name: Retrain club models + report metrics
+        run: npx tsx src/prediction/scripts/trainModels.ts
+
+      - name: Regenerate predictions
+        run: npx tsx src/prediction/scripts/predict.ts

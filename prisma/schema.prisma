@@ -1,0 +1,656 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MatchStatus {
+  SCHEDULED
+  LIVE
+  FINAL
+  POSTPONED
+}
+
+enum Confidence {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum SelectionStatus {
+  PAPER
+  PLACED
+  SETTLED
+  VOID
+}
+
+enum Result {
+  WIN
+  LOSS
+  PUSH
+}
+
+enum BankrollEventType {
+  DEPOSIT
+  WITHDRAWAL
+  BET_PLACED
+  BET_SETTLED
+  ADJUSTMENT
+}
+
+enum SelectionSource {
+  MODEL
+  MODEL_DERIVED
+  MANUAL_EXPLORATORY
+  MANUAL_CONVICTION
+}
+
+enum SelectionStrategy {
+  STANDARD
+  CONSENSUS
+}
+
+model Match {
+  id          String      @id @default(cuid())
+  league      String
+  homeTeam    String
+  awayTeam    String
+  kickoffUtc  DateTime
+  status      MatchStatus @default(SCHEDULED)
+  homeGoals       Int?
+  awayGoals       Int?
+  elapsedMinutes  Int?
+  homeXg      Float?
+  awayXg      Float?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  oddsSnapshots    OddsSnapshot[]
+  predictions      Prediction[]
+  selections       Selection[]
+  calibrationPoints CalibrationPoint[]
+
+  @@unique([league, homeTeam, awayTeam, kickoffUtc])
+  @@index([kickoffUtc])
+  @@index([league, kickoffUtc])
+  @@index([status])
+}
+
+model OddsSnapshot {
+  id          String   @id @default(cuid())
+  matchId     String
+  bookmaker   String
+  market      String
+  outcome     String
+  decimalOdds Float
+  fetchedAt   DateTime
+  isClosing   Boolean  @default(false)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, bookmaker, market, fetchedAt])
+  @@index([matchId, isClosing])
+  @@index([fetchedAt])
+}
+
+model Prediction {
+  id                 String   @id @default(cuid())
+  matchId            String
+  generatedAt        DateTime @default(now())
+  modelVersion       String
+  scoreMatrix        Json
+  pHome              Float
+  pDraw              Float
+  pAway              Float
+  pOver25            Float
+  pBtts              Float
+  calibrationApplied Boolean  @default(false)
+  calibrationVersion String?
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, generatedAt])
+  @@index([modelVersion])
+}
+
+model Selection {
+  id               String          @id @default(cuid())
+  matchId          String
+  market           String
+  outcome          String
+  modelProb        Float
+  pinnacleFairProb Float?
+  bookieFairProb   Float
+  bookmaker        String
+  oddsAtSelection  Float
+  oddsAtPlacement  Float?
+  edgePct          Float
+  kellyFraction    Float
+  recommendedStake Float
+  confidence       Confidence
+  selectedAt       DateTime        @default(now())
+  closingOdds      Float?
+  clv              Float?
+  status           SelectionStatus @default(PAPER)
+  betPlaced        Boolean         @default(false)
+  isLive           Boolean         @default(false)
+  stakeActual      Float?
+  result           Result?
+  pnl              Float?
+  source             SelectionSource   @default(MODEL)
+  selectionStrategy  SelectionStrategy @default(STANDARD)
+  manualNote         String?
+  derivedFromIds     String[]
+  backfilled         Boolean           @default(false)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([status, selectedAt])
+  @@index([matchId])
+  @@index([selectedAt])
+  @@index([confidence, status])
+}
+
+model BankrollEvent {
+  id              String             @id @default(cuid())
+  occurredAt      DateTime           @default(now())
+  type            BankrollEventType
+  amount          Float
+  balanceAfter    Float
+  selectionId     String?
+  note            String?
+  modelVersion    String?
+  selectionSource SelectionSource?
+
+  @@index([occurredAt])
+}
+
+model AppSetting {
+  key   String @id
+  value String
+}
+
+model ApiBudget {
+  id       String   @id @default(cuid())
+  provider String
+  date     DateTime @db.Date
+  requests Int      @default(0)
+
+  @@unique([provider, date])
+  @@index([provider, date])
+}
+
+model CalibrationPoint {
+  id            String   @id @default(cuid())
+  matchId       String
+  market        String
+  predictedProb Float
+  actualOutcome Int
+  modelVersion  String
+  matchDate     DateTime
+  createdAt     DateTime @default(now())
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([market, matchDate])
+  @@index([modelVersion])
+}
+
+model LeagueStanding {
+  id           String   @id @default(cuid())
+  league       String
+  season       Int
+  team         String
+  rank         Int
+  points       Int
+  played       Int
+  matchesTotal Int
+  description  String?
+  fetchedAt    DateTime @default(now())
+
+  @@unique([league, season, team])
+  @@index([league, season])
+  @@index([fetchedAt])
+}
+
+// =====================================================================
+// PREDICTION ENGINE — raw data tables (Phase 1)
+// Fully separate from the edge-detection model above. Namespaced by
+// sport via @@map; nothing here references Match / Selection / etc.
+// =====================================================================
+
+// ---- Football (API-Football + OpenFootball history + Understat xG) ----
+
+// One row per fixture from any football source, deduped on (source, sourceMatchId).
+// This is the prediction-engine's OWN fixture store, independent of `Match`.
+model FootballFixture {
+  id            String    @id @default(cuid())
+  source        String    // "api_football" | "openfootball" | "understat"
+  sourceMatchId String    // provider's native id (or synthesized for openfootball)
+  league        String
+  season        Int
+  kickoffUtc    DateTime
+  homeTeam      String
+  awayTeam      String
+  status        String    // "SCHEDULED" | "FINAL" | "POSTPONED"
+  homeGoals     Int?
+  awayGoals     Int?
+  homeXg        Float?
+  awayXg        Float?
+  fetchedAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lineups       FootballLineup[]
+
+  @@unique([source, sourceMatchId])
+  @@index([league, season])
+  @@index([kickoffUtc])
+  @@index([homeTeam, awayTeam, kickoffUtc])
+  @@map("football_fixtures")
+}
+
+// Lineups + injuries/suspensions from API-Football, one row per (fixture, team, player).
+model FootballLineup {
+  id            String   @id @default(cuid())
+  fixtureId     String
+  apiFixtureId  String   // API-Football fixture id (for reconciliation)
+  team          String
+  playerName    String
+  playerId      Int?
+  role          String   // "STARTER" | "SUB" | "INJURED" | "SUSPENDED"
+  position      String?
+  reason        String?  // injury/suspension reason if applicable
+  fetchedAt     DateTime @default(now())
+
+  fixture       FootballFixture @relation(fields: [fixtureId], references: [id], onDelete: Cascade)
+
+  @@unique([fixtureId, team, playerName, role])
+  @@index([apiFixtureId])
+  @@map("football_lineups")
+}
+
+// ---- Tennis (Jeff Sackmann tennis_atp / tennis_wta CSVs) ----
+
+model TennisMatch {
+  id            String   @id @default(cuid())
+  tour          String   // "ATP" | "WTA"
+  sourceFile    String   // e.g. "atp_matches_2024.csv"
+  tourneyId     String
+  tourneyName   String
+  tourneyDate   DateTime
+  surface       String?  // "Hard" | "Clay" | "Grass" | "Carpet"
+  round         String?
+  bestOf        Int?
+  winnerName    String
+  winnerId      Int?
+  winnerRank    Int?
+  loserName     String
+  loserId       Int?
+  loserRank     Int?
+  score         String?
+
+  @@unique([tour, tourneyId, winnerId, loserId, round])
+  @@index([tour, tourneyDate])
+  @@index([surface])
+  @@index([winnerName])
+  @@index([loserName])
+  @@map("tennis_matches")
+}
+
+// ---- Basketball / NBA (nba_api) ----
+
+model NbaGameLog {
+  id            String   @id @default(cuid())
+  season        String   // e.g. "2024-25"
+  gameId        String
+  gameDate      DateTime
+  teamId        Int
+  teamAbbrev    String
+  opponentAbbrev String?
+  isHome        Boolean
+  won           Boolean?
+  pts           Int?
+  oppPts        Int?
+  offRating     Float?
+  defRating     Float?
+  netRating     Float?
+  pace          Float?
+  fetchedAt     DateTime @default(now())
+
+  @@unique([gameId, teamId])
+  @@index([season, teamAbbrev])
+  @@index([gameDate])
+  @@map("nba_game_logs")
+}
+
+model NbaInjury {
+  id          String   @id @default(cuid())
+  reportDate  DateTime
+  teamAbbrev  String
+  playerName  String
+  status      String   // "Out" | "Questionable" | "Doubtful" | "Probable"
+  reason      String?
+  fetchedAt   DateTime @default(now())
+
+  @@unique([reportDate, teamAbbrev, playerName])
+  @@index([teamAbbrev, reportDate])
+  @@map("nba_injuries")
+}
+
+// ---- American Football / NFL (nfl_data_py) ----
+
+// Aggregated team-game EPA + result. PBP is rolled up at ingest to keep volume sane.
+model NflTeamGame {
+  id            String   @id @default(cuid())
+  season        Int
+  week          Int
+  gameId        String
+  gameDate      DateTime?
+  team          String
+  opponent      String
+  isHome        Boolean
+  won           Boolean?
+  pointsFor     Int?
+  pointsAgainst Int?
+  offEpaPerPlay Float?
+  defEpaPerPlay Float?
+  startingQb    String?
+  byeWeekFlag   Boolean  @default(false)
+  fetchedAt     DateTime @default(now())
+
+  @@unique([gameId, team])
+  @@index([season, team])
+  @@index([season, week])
+  @@map("nfl_team_games")
+}
+
+model NflInjury {
+  id          String   @id @default(cuid())
+  season      Int
+  week        Int
+  team        String
+  playerName  String
+  position    String?
+  status      String?  // "Out" | "Doubtful" | "Questionable" | "IR"
+  reason      String?
+  fetchedAt   DateTime @default(now())
+
+  @@unique([season, week, team, playerName])
+  @@index([season, week, team])
+  @@map("nfl_injuries")
+}
+
+// ---- Baseball / MLB (pybaseball) ----
+
+model MlbTeamGame {
+  id            String   @id @default(cuid())
+  season        Int
+  gameDate      DateTime
+  gameId        String
+  team          String
+  opponent      String
+  isHome        Boolean
+  won           Boolean?
+  runsFor       Int?
+  runsAgainst   Int?
+  startingPitcher String?
+  ballpark      String?
+  fetchedAt     DateTime @default(now())
+
+  @@unique([gameId, team])
+  @@index([season, team])
+  @@index([gameDate])
+  @@map("mlb_team_games")
+}
+
+// Starting-pitcher rolling stats (ERA/FIP/xFIP) keyed by date snapshot.
+model MlbPitcherStat {
+  id          String   @id @default(cuid())
+  season      Int
+  asOfDate    DateTime
+  pitcherName String
+  pitcherId   Int?
+  team        String?
+  era         Float?
+  fip         Float?
+  xfip        Float?
+  ip          Float?
+  fetchedAt   DateTime @default(now())
+
+  @@unique([asOfDate, pitcherName])
+  @@index([season, pitcherName])
+  @@map("mlb_pitcher_stats")
+}
+
+// Team batting rolling snapshot (OPS / wRC+).
+model MlbTeamBatting {
+  id          String   @id @default(cuid())
+  season      Int
+  asOfDate    DateTime
+  team        String
+  ops         Float?
+  wrcPlus     Float?
+  fetchedAt   DateTime @default(now())
+
+  @@unique([asOfDate, team])
+  @@index([season, team])
+  @@map("mlb_team_batting")
+}
+
+// ---- Rugby (ESPN undocumented API — sparse) ----
+
+model RugbyMatch {
+  id            String   @id @default(cuid())
+  competition   String   // "Top 14" | "Premiership" | "URC" | "Six Nations" | "Rugby Championship"
+  espnEventId   String
+  kickoffUtc    DateTime
+  homeTeam      String
+  awayTeam      String
+  status        String   // "SCHEDULED" | "FINAL"
+  homeScore     Int?
+  awayScore     Int?
+  fetchedAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([espnEventId])
+  @@index([competition, kickoffUtc])
+  @@index([kickoffUtc])
+  @@map("rugby_matches")
+}
+
+model RugbyStanding {
+  id           String   @id @default(cuid())
+  competition  String
+  season       Int
+  team         String
+  rank         Int?
+  points       Int?
+  played       Int?
+  fetchedAt    DateTime @default(now())
+
+  @@unique([competition, season, team])
+  @@index([competition, season])
+  @@map("rugby_standings")
+}
+
+// ---- Shared: per-provider ingestion run log (gap flagging) ----
+
+model IngestionRun {
+  id          String   @id @default(cuid())
+  sport       String   // "football" | "tennis" | "nba" | "nfl" | "mlb" | "rugby"
+  source      String   // provider/module name
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  rowsWritten Int      @default(0)
+  ok          Boolean  @default(false)
+  note        String?  // gaps / errors / "rugby sparse: no data for X"
+
+  @@index([sport, startedAt])
+  @@map("prediction_ingestion_runs")
+}
+
+// ---- Phase 2: engineered features (one row per match, sport-agnostic JSON) ----
+//
+// `matchKey` is a stable per-sport identifier for the match the features
+// describe (e.g. football_fixtures.id, "<tour>:<tourneyId>:<w>:<l>:<round>" for
+// tennis, "<gameId>:<team>" for the home perspective in team sports). All
+// features are computed AS-OF kickoff (only prior matches), so rows are
+// leak-free for both training and live prediction. `features` holds the
+// numeric feature map consumed by the Phase 3 models.
+model PredictionFeature {
+  id             String   @id @default(cuid())
+  sport          String   // "football" | "tennis" | "nba" | "nfl" | "mlb" | "rugby"
+  matchKey       String
+  league         String?  // league/competition/tour where applicable
+  kickoffUtc     DateTime
+  homeTeam       String   // home team / player A
+  awayTeam       String   // away team / player B
+  features       Json     // numeric feature map (nulls allowed for missing inputs)
+  featureVersion String
+  computedAt     DateTime @default(now())
+
+  @@unique([sport, matchKey, featureVersion])
+  @@index([sport, kickoffUtc])
+  @@index([sport, featureVersion])
+  @@map("prediction_features")
+}
+
+// ---- Phase 3: trained model artifacts + validation metrics ----
+//
+// One row per (sport) latest-trained model. `artifactPath` points to the
+// serialised file under src/prediction/models/. Metrics are the temporal-holdout
+// validation results (last 10% chronologically). `modelVersion` ties predictions
+// to the exact training run.
+model ModelArtifact {
+  id            String   @id @default(cuid())
+  sport         String
+  modelType     String   // "dixon_coles" | "logistic"
+  modelVersion  String   // e.g. "football-v1-20260615"
+  artifactPath  String
+  featureVersion String
+  trainRows     Int
+  valRows       Int
+  valAccuracy   Float?
+  valBrier      Float?
+  features      Json     // feature names used / coefficients summary
+  trainedAt     DateTime @default(now())
+  ok            Boolean  @default(true)
+  note          String?
+
+  @@index([sport, trainedAt])
+  @@map("prediction_models")
+}
+
+// ---- Phase 3/4: emitted prediction output objects ----
+//
+// One row per (sport, matchKey, modelVersion). Stores the unified prediction
+// object. Rugby rows carry flag="insufficient_data" with null probabilities.
+model EnginePrediction {
+  id              String   @id @default(cuid())
+  sport           String
+  league          String?
+  matchKey        String
+  kickoffUtc      DateTime
+  homeTeam        String
+  awayTeam        String
+  predictedOutcome String? // "home" | "away" | "draw" | null
+  pHome           Float?
+  pDraw           Float?
+  pAway           Float?
+  expectedMargin  Float?
+  confidenceTier  String?  // "high" | "medium" | "low" | null
+  flag            String?  // "insufficient_data" | "unknown_team" | null
+  featuresUsed    Json
+  modelVersion    String
+  generatedAt     DateTime @default(now())
+
+  @@unique([sport, matchKey, modelVersion])
+  @@index([sport, kickoffUtc])
+  @@index([generatedAt])
+  @@map("engine_predictions")
+}
+
+// =====================================================================
+// INTERNATIONAL MATCHES MODULE — national teams (football + rugby).
+// Fully separate from the club engine: own ELO + fixtures + model. Predictions
+// land in engine_predictions with sport='football_intl' / 'rugby_intl' so the
+// dashboard renders them with no shape changes.
+// =====================================================================
+
+// match_type weighting: friendly 0.3 | qualifier 0.7 | final_tournament 1.0
+// (stored as the string enum; weight applied at training time).
+
+// ---- International Football (eloratings.net + ESPN fixtures) ----
+
+model IntlFootballElo {
+  id        String   @id @default(cuid())
+  country   String
+  eloRating Float
+  date      DateTime @db.Date
+  fetchedAt DateTime @default(now())
+
+  @@unique([country, date])
+  @@index([country, date])
+  @@map("intl_football_elo")
+}
+
+model IntlFootballFixture {
+  id            String   @id @default(cuid())
+  source        String   // "eloratings" | "espn"
+  sourceMatchId String
+  homeCountry   String
+  awayCountry   String
+  competition   String   // "FIFA World Cup" | "UEFA Qualifier" | "Friendly" | ...
+  matchType     String   // "friendly" | "qualifier" | "final_tournament"
+  kickoffUtc    DateTime
+  neutralVenue  Boolean  @default(false)
+  status        String   // "SCHEDULED" | "FINAL"
+  homeScore     Int?
+  awayScore     Int?
+  fetchedAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([source, sourceMatchId])
+  @@index([kickoffUtc])
+  @@index([homeCountry, awayCountry, kickoffUtc])
+  @@map("intl_football_fixtures")
+}
+
+// ---- International Rugby (World Rugby Rankings + ESPN fixtures) ----
+
+model IntlRugbyElo {
+  id        String   @id @default(cuid())
+  country   String
+  rating    Float
+  date      DateTime @db.Date
+  fetchedAt DateTime @default(now())
+
+  @@unique([country, date])
+  @@index([country, date])
+  @@map("intl_rugby_elo")
+}
+
+model IntlRugbyFixture {
+  id            String   @id @default(cuid())
+  source        String
+  sourceMatchId String
+  homeCountry   String
+  awayCountry   String
+  competition   String   // "Six Nations" | "Rugby Championship" | "World Cup" | ...
+  matchType     String   // "friendly" | "qualifier" | "final_tournament"
+  kickoffUtc    DateTime
+  neutralVenue  Boolean  @default(false)
+  status        String   // "SCHEDULED" | "FINAL"
+  homeScore     Int?
+  awayScore     Int?
+  fetchedAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([source, sourceMatchId])
+  @@index([kickoffUtc])
+  @@index([homeCountry, awayCountry, kickoffUtc])
+  @@map("intl_rugby_fixtures")
+}

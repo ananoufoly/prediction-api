@@ -1,0 +1,13 @@
+# Python deps for the prediction-engine fetchers + trainers.
+# Pinned to the versions verified locally. scikit-learn must be >=1.7 for
+# FrozenEstimator and the multi_class-free LogisticRegression API.
+nba_api==1.11.4
+nfl_data_py==0.3.2
+pybaseball==2.2.7
+scikit-learn==1.8.0
+scipy==1.17.1
+pandas==3.0.2
+numpy==2.4.4
+requests==2.33.1
+certifi==2026.4.22
+joblib==1.5.3

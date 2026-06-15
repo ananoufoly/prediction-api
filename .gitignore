@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment / secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+launchagent.log
+
+# macOS
+.DS_Store
+
+# TS / cache
+*.tsbuildinfo
+.vite/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# NOTE: prisma/migrations/ is intentionally NOT ignored — Render runs
+# `prisma migrate deploy` against them.

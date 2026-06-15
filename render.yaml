@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: prediction-api
+    runtime: node
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: node dist/server.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production

@@ -1,0 +1,39 @@
+name: nightly-predict
+
+# Generate prediction objects from the current trained artifacts.
+# Needs Python because the predictors (Dixon-Coles, logistic, intl) run via the
+# serialized sklearn/scipy artifacts.
+on:
+  schedule:
+    - cron: '30 5 * * *' # 05:30 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Generate predictions (club + international)
+        run: npx tsx src/prediction/scripts/predict.ts
